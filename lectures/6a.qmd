@@ -1,0 +1,981 @@
+---
+title: "Convolutional Neural Networks"
+subtitle: "Image Classification with CIFAR-10 and PyTorch"
+format:
+  revealjs:
+    width: 1200
+    height: 800
+    scrollable: true
+    theme: default
+    preview-links: true
+    navigation-mode: vertical
+    controls-layout: edges
+    controls-tutorial: true
+    slide-number: true
+    incremental: false
+    code-overflow: scroll
+    embed-resources: true
+jupyter: python3
+execute:
+  echo: true
+  eval: false
+  warning: false
+editor: source
+---
+
+## Run This Lecture
+
+Install Python packages in the environment used by Quarto:
+
+
+- All code chunks use Python and run in order in one session.
+- Code is displayed without execution by default, matching the original lecture.
+- Under `execute` in the YAML, change `eval: false` to `eval: true` to run all examples during rendering.
+- The first execution downloads CIFAR-10; training runs for 10 epochs.
+- Render with `quarto render 6a_pytorch.qmd`.
+- Run the companion script with `python 6a_pytorch.py`.
+
+::: notes
+The converted slides use the default theme and built-in Quarto features so that
+the missing custom theme, math header, and third-party extensions are not required.
+Choose a compatible torch/torchvision pair; GPU installation instructions are
+available at https://pytorch.org/get-started/locally/.
+:::
+
+## Python Packages
+
+```{python}
+from pathlib import Path
+import random
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+from torch import nn
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
+
+seed = 909
+random.seed(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(seed)
+# Seeds help reproducibility; results can still vary by hardware.
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f'Using {device}')
+```
+
+## Load CIFAR-10 with Torchvision
+
+```{python}
+data_dir = Path('./data')
+transform = transforms.Compose([
+    transforms.ToTensor(),  # uint8 H x W x C -> float C x H x W in [0, 1]
+    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+])
+train_ds = datasets.CIFAR10(
+    root=str(data_dir), train=True, download=True, transform=transform
+)
+test_ds = datasets.CIFAR10(
+    root=str(data_dir), train=False, download=True, transform=transform
+)
+classes = tuple(train_ds.classes)  # class IDs are 0 through 9
+
+# Undo normalization before displaying an image.
+def display_image(image):
+    return (image.detach().cpu() * 0.5 + 0.5).clamp(0, 1).permute(1, 2, 0).numpy()
+```
+
+# Image Classification
+
+## Image Classification
+
+Image classification is the process of having a computer analyze an image and classify it with a selected category.
+
+## Image Classification
+
+What class would you assign to an animal with these features?
+
+::: fragment
+A small animal has a bushy tail, pointed ears, and paws holding a nut.
+
+Which visual features support classifying it as a squirrel?
+:::
+
+## Image Classification
+
+How did you know it was a squirrel?
+
+# Convolutional Neural Networks
+
+## Convolutional Neural Networks
+
+Convolutional Neural Networks became popular in the 2010's with the success of image classification.
+
+::: fragment
+The idea is to mimic how a human mind will classify an image. (From an old understanding of neurobiology.)
+:::
+
+::: fragment
+With the use of convolutional filters, a convolutional neural networks is trained by using a set of images that have been previously classified.
+:::
+
+::: fragment
+Once the network is trained, new images can be classified.
+:::
+
+## CNN
+
+| Stage | Learns or summarizes |
+|---|---|
+| Early convolution layers | Local features such as edges and textures |
+| Later convolution layers | Combinations of earlier features |
+| Fully connected layers | Class scores from the extracted features |
+
+## Architecture
+
+| Operation | Output shape per image |
+|---|---|
+| RGB input | $3 \times 32 \times 32$ |
+| Conv(3 → 8), ReLU, MaxPool(2) | $8 \times 16 \times 16$ |
+| Conv(8 → 16), ReLU, MaxPool(2) | $16 \times 8 \times 8$ |
+| Flatten | $1024$ |
+| Dropout(0.5), Linear(1024 → 16), ReLU | $16$ |
+| Linear(16 → 10) | $10$ logits |
+
+
+
+# Input Data
+
+## Input Data
+
+```{python}
+image, label = train_ds[0]  # Python indexes from 0
+img = display_image(image)  # H x W x C for matplotlib
+plt.figure(figsize=(4, 4))
+plt.imshow(img)
+plt.title(classes[label])
+plt.axis('off')
+plt.show()
+print('Tensor shape:', tuple(image.shape))  # (3, 32, 32)
+```
+
+## Channels
+ 
+```{python}
+fig, axes = plt.subplots(1, 3, figsize=(9, 3))
+for channel, (name, ax) in enumerate(zip(('Red', 'Green', 'Blue'), axes)):
+    colored = np.zeros_like(img)
+    colored[:, :, channel] = img[:, :, channel]
+    ax.imshow(colored)
+    ax.set_title(name)
+    ax.axis('off')
+plt.tight_layout()
+plt.show()
+```
+
+## Data — Red Channel
+
+```{python}
+# All 32 x 32 red-channel values, on the original [0, 1] scale.
+red = img[:, :, 0]
+with np.printoptions(precision=2, suppress=True, threshold=np.inf):
+    print(red)
+```
+
+
+# Convolutional Block
+
+## Convolutional Block
+
+A convolutional block (layer) is the process where a matrix (array) of data undergoes the following process.
+
+1. Apply learned convolutional kernels to the input channels.
+2. Sum channel contributions and add a bias for each output filter.
+3. Apply an activation function (ReLU).
+4. Pool each resulting feature map.
+
+## Convolution Filter
+
+A Convolution Filter will highlight certain features of an image.
+
+::: fragment
+The matching features will contain a large value.
+:::
+
+::: fragment
+Nonmatching features will contain a smaller value.
+:::
+
+## Convolution Filter
+
+::: panel-tabset
+### Image
+
+$$
+\left(
+\begin{array}{ccc}
+a & b & c \\
+d & e & f \\
+g & h & i \\
+j & k & l 
+\end{array}
+\right)
+$$
+
+### Filter
+
+$$
+\left(
+\begin{array}{cc}
+\alpha & \beta \\
+\gamma & \delta
+\end{array}
+\right)
+$$
+
+### Both
+
+$$
+\left(
+\begin{array}{ccc}
+a & b & c \\
+d & e & f \\
+g & h & i \\
+j & k & l 
+\end{array}
+\right)
+*
+\left(
+\begin{array}{cc}
+\alpha & \beta \\
+\gamma & \delta
+\end{array}
+\right)
+$$
+
+### Results
+
+$$
+\left(
+\begin{array}{cc}
+a\alpha + b\beta + d\gamma + e\delta & b\alpha + c\beta + e\gamma + f\delta \\
+d\alpha + e\beta + g\gamma + h\delta & e\alpha + f\beta + h\gamma + i\delta \\
+g\alpha + h\beta + j\gamma + k\delta & h\alpha + i\beta + k\gamma + l\delta
+\end{array}
+\right)
+$$
+:::
+
+
+## Data Example
+
+$$
+\left(
+\begin{array}{ccc}
+1 & 2 & 3 \\
+4 & 5 & 6 \\
+7 & 8 & 9 
+\end{array}
+\right)
+*
+\left(
+\begin{array}{cc}
+1/2 & 1/3 \\
+1/3 & 1/2
+\end{array}
+\right)
+$$
+
+$$
+\left(
+\begin{array}{cc}
+1/2 + 2/3 + 4/3 + 5/2 & 1 + 1 + 5/3 + 3  \\
+2 + 5/3 + 7/3 + 4 & 5/2 + 2 + 8/3 + 9/2
+\end{array}
+\right)
+$$
+
+## Folding
+
+Here, **folding** means summing filtered contributions across input channels.
+For each output channel, `nn.Conv2d` uses a separate learned kernel for each input channel, sums the results, and adds a bias. This happens inside the convolution layer.
+
+## Folding Example
+
+
+$$
+\left(
+\begin{array}{cc}
+1 & 2  \\
+3 & 4 
+\end{array}
+\right)
++
+\left(
+\begin{array}{cc}
+5 & 6 \\
+7 & 8
+\end{array}
+\right)
++
+\left(
+\begin{array}{cc}
+9 & 10 \\
+11 & 12
+\end{array}
+\right)
+$$
+
+
+$$
+\left(
+\begin{array}{cc}
+15 & 18 \\
+21 & 24
+\end{array}
+\right)
+$$
+
+
+## Pooling Layers
+
+The act of summarizing a large matrix to a smaller matrix.
+
+
+## Max Pool
+
+$$
+\left[
+\begin{array}{cccc}
+1 & 3 & 9 & 5 \\
+6 & 2 & 3 & 4 \\
+1 & 0 & 6 & 4 \\
+8 & 4 & 2 & 7
+\end{array}
+\right] \rightarrow
+\left[
+\begin{array}{cc}
+6 & 9 \\
+8 & 7
+\end{array}
+\right]
+$$
+
+## Overall
+
+::: panel-tabset
+
+### Input
+
+$$
+\left(
+\begin{array}{ccc}
+1 & 2 & 3 \\
+4 & 5 & 6 \\
+7 & 8 & 9  
+\end{array}
+\right)
+$$
+
+$$
+\left(
+\begin{array}{ccc}
+1 & 2 & 3 \\
+4 & 5 & 6 \\
+7 & 8 & 9  
+\end{array}
+\right)
+$$
+
+$$
+\left(
+\begin{array}{ccc}
+1 & 2 & 3 \\
+4 & 5 & 6 \\
+7 & 8 & 9  
+\end{array}
+\right)
+$$
+
+
+### Filter
+
+$$
+\left(
+\begin{array}{ccc}
+1 & 2 & 3 \\
+4 & 5 & 6 \\
+7 & 8 & 9  
+\end{array}
+\right)
+*
+\left(
+\begin{array}{cc}
+\alpha & \beta \\
+\gamma & \delta
+\end{array}
+\right)
+$$
+
+$$
+\left(
+\begin{array}{ccc}
+10 & 20 & 30 \\
+40 & 50 & 60 \\
+70 & 80 & 90  
+\end{array}
+\right)
+*
+\left(
+\begin{array}{cc}
+\alpha & \beta \\
+\gamma & \delta
+\end{array}
+\right)
+$$
+
+
+$$
+\left(
+\begin{array}{ccc}
+100 & 200 & 300 \\
+400 & 500 & 600 \\
+700 & 800 & 900  
+\end{array}
+\right)
+*
+\left(
+\begin{array}{cc}
+\alpha & \beta \\
+\gamma & \delta
+\end{array}
+\right)
+$$
+
+
+
+### Fold
+
+$$
+\left(
+\begin{array}{cc}
+1 & 2  \\
+3 & 4 
+\end{array}
+\right)
++
+\left(
+\begin{array}{cc}
+5 & 6 \\
+7 & 8
+\end{array}
+\right)
++
+\left(
+\begin{array}{cc}
+9 & 10 \\
+11 & 12
+\end{array}
+\right)
+$$
+
+
+$$
+\left(
+\begin{array}{cc}
+15 & 18 \\
+21 & 24
+\end{array}
+\right)
+$$
+
+### Pool
+
+$$
+\left[
+\begin{array}{cccc}
+1 & 3 & 9 & 5 \\
+6 & 2 & 3 & 4 \\
+1 & 0 & 6 & 4 \\
+8 & 4 & 2 & 7
+\end{array}
+\right] \rightarrow
+\left[
+\begin{array}{cc}
+6 & 9 \\
+8 & 7
+\end{array}
+\right]
+$$
+
+:::
+
+
+# CNN Architecture
+
+## CNN Architecture
+
+| Operation | Output shape per image |
+|---|---|
+| RGB input | $3 \times 32 \times 32$ |
+| Conv(3 → 8), ReLU, MaxPool(2) | $8 \times 16 \times 16$ |
+| Conv(8 → 16), ReLU, MaxPool(2) | $16 \times 8 \times 8$ |
+| Flatten | $1024$ |
+| Dropout(0.5), Linear(1024 → 16), ReLU | $16$ |
+| Linear(16 → 10) | $10$ logits |
+
+
+## Convolutional Block 1
+
+::: panel-tabset
+
+### Process
+
+- Given an 3 channels (3 matrix)
+    - Apply a $k_1 \times k_1$ convolutional filter for each individual channel
+    - Add up the results for each channel by convolutional filter
+    - Apply a activation function
+    - Pool the data using a $\varrho_1 \times \varrho_1$ window matrix
+- Repeat the process for the remaining $\varkappa_1$ filters 
+
+### Define
+
+- The number of channels available as input
+- The size of the convolutional filter ($k_1$)
+- The activation function
+- The pooling mechanism
+    - Define the size of the window matrix ($\varrho_h$)
+- Define how many convolutional filters will be used ($\varkappa_1$)
+
+:::
+
+## Convolutional Block 2 (h=2)
+
+::: panel-tabset
+
+### Process
+
+- Use the number of channels from the previous block ($\varkappa_1$)
+    - Apply a $k_2 \times k_2$ convolutional filter for each individual channel
+    - Add up the results for each channel by convolutional filter
+    - Apply a activation function
+    - Pool the data using a $\varrho_2 \times \varrho_2$ window matrix
+- Repeat the process for the remaining $\varkappa_2$ filters 
+
+### Define
+
+- The number of channels available as input
+- The size of the convolutional filter ($k_2$)
+- The activation function
+- The pooling mechanism
+    - Define the size of the window matrix ($\varrho_h$)
+- Define how many convolutional filters will be used ($\varkappa_2$)
+
+:::
+
+## Convolutional Block 2+ (h=h)
+
+::: panel-tabset
+
+### Process
+
+- Use the number of channels from the previous block ($\varkappa_{h-1}$)
+    - Apply a $k_h \times k_h$ convolutional filter for each individual channel
+    - Add up the results for each channel by convolutional filter
+    - Apply a activation function
+    - Pool the data using a $\varrho_h \times \varrho_h$ window matrix
+- Repeat the process for the remaining $\varkappa_h$ filters 
+
+### Define
+
+- The number of channels available as input
+- The size of the convolutional filter ($k_h$)
+- The activation function
+- The pooling mechanism
+    - Define the size of the window matrix ($\varrho_h$)
+- Define how many convolutional filters will be used ($\varkappa_h$)
+
+:::
+
+
+## Flattening
+
+After convolution and pooling, each image has a collection of feature maps. Flatten these maps into one feature vector per image.
+
+::: fragment
+These features become inputs to fully connected layers that classify the image.
+:::
+
+## Hidden Layers
+
+The flattened feature vector enters a small fully connected network:
+
+$$
+\boldsymbol{h} = \operatorname{ReLU}(W_1\operatorname{Dropout}(\boldsymbol{x})+\boldsymbol{b}_1),
+\qquad \boldsymbol{z}=W_2\boldsymbol{h}+\boldsymbol{b}_2.
+$$
+
+- $\boldsymbol{x}$ has 1024 features; $\boldsymbol{h}$ has 16 activations.
+- $\boldsymbol{z}$ contains the 10 class logits.
+- Dropout randomly zeros features during training and is disabled during evaluation.
+
+## Neural Network
+
+| Operation | Output shape per image |
+|---|---|
+| RGB input | $3 \times 32 \times 32$ |
+| Conv(3 → 8), ReLU, MaxPool(2) | $8 \times 16 \times 16$ |
+| Conv(8 → 16), ReLU, MaxPool(2) | $16 \times 8 \times 8$ |
+| Flatten | $1024$ |
+| Dropout(0.5), Linear(1024 → 16), ReLU | $16$ |
+| Linear(16 → 10) | $10$ logits |
+
+
+## Loss Function
+
+::: {.columns}
+::: {.column}
+
+### Mean Squared Error
+
+
+$$
+\frac{1}{n}\sum^n_{i=1}\left\{Y_i-f(\boldsymbol X; \boldsymbol \theta)\right\}^2
+$$
+
+
+:::
+::: {.column}
+
+### Cross-Entropy
+
+$$
+ - \sum^n_{i=1}\sum^k_{j=1} Y_{ij}\log\left\{f_j(\boldsymbol{X}_i;\boldsymbol{\theta})\right\}
+$$
+
+
+:::
+:::
+
+$\boldsymbol{\theta}$ represents all the parameters in the convolutional filters and hidden layers.
+
+
+
+
+## Training
+
+The CNN is trained by supplying a set of pre-classified images.
+
+::: fragment
+Backpropagation computes gradients of the loss. An optimizer updates the parameters in the convolutional and fully connected layers:
+:::
+
+::: {.fragment}
+- Stochastic gradient descent or adaptive methods such as RMSprop (used below)
+:::
+
+# PyTorch CIFAR-10 
+
+## Process {.incremental}
+
+- Import Python packages
+- Load Data
+- Define Convolutional Block
+- Define Model
+- Train Model
+
+
+## CIFAR-10 Data
+
+The Canadian Institute for Advanced Research (CIFAR) provides a collection of 60,000 images that are classified into 10 categories. Each image has 32 by 32 pixels with three color channels (RGB). The standard split is 50,000 training images and 10,000 test images.
+
+## CIFAR-10 Classes
+
+::: {.columns}
+::: {.column}
+- airplanes
+- cars
+- birds
+- cats
+- deer
+:::
+::: {.column}
+- dogs
+- frogs
+- horses
+- ships
+- trucks
+:::
+:::
+
+## CIFAR-10 Example
+
+```{python}
+example_image, example_label = train_ds[38]  # 39th training image
+plt.figure(figsize=(4, 4))
+plt.imshow(display_image(example_image))
+plt.title(classes[example_label])
+plt.axis('off')
+plt.show()
+```
+
+## Check the Python Data
+
+```{python}
+# The imports, seed, transform, and datasets were defined above.
+print(f'Training images: {len(train_ds):,}')
+print(f'Test images: {len(test_ds):,}')
+print('Classes:', classes)
+```
+
+## CIFAR-10 Data
+
+::: panel-tabset
+
+### Overview
+
+- Define Directory
+    - You may need to change it
+    - The earlier setup uses `Path("./data")`
+- Load training CIFAR-10 Data
+- Load testing CIFAR-10 Data
+- Create Data Loader
+    - Will create batches of data (128 images)
+    - Feed one batch at a time to the model; CIFAR-10 itself is held in host memory.
+
+
+### Code
+
+```{python}
+batch_size = 128
+train_dl = DataLoader(
+    train_ds, batch_size=batch_size, shuffle=True,
+    num_workers=0,  # works in Quarto, notebooks, and scripts
+    generator=torch.Generator().manual_seed(seed),
+)
+test_dl = DataLoader(
+    test_ds, batch_size=batch_size, shuffle=False, num_workers=0
+)
+images, labels = next(iter(train_dl))
+print(images.shape)  # torch.Size([128, 3, 32, 32])
+print(labels.shape, labels.dtype)  # [128], torch.int64
+```
+
+:::
+
+## Convolutional Block
+
+::: panel-tabset
+
+### Overview
+
+- Define Convolutional Block
+    - Indicate Kernel Filter Size
+        - $3\times 3$ Matrix
+        - Fold by adding
+    - Apply Rectified Linear Unit
+    - Pool Matrix
+        - Max Function
+        - Window: $2\times 2$ matrix; stride 2
+
+### Code
+
+```{python}
+class ConvBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.conv = nn.Conv2d(
+            in_channels, out_channels, kernel_size=3, padding=1
+        )
+        self.relu = nn.ReLU()
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+
+    def forward(self, x):
+        x = self.conv(x)  # sum over input channels and add bias
+        x = self.relu(x)
+        return self.pool(x)
+```
+
+
+:::
+
+## Model
+
+
+::: panel-tabset
+
+### Overview
+
+- Using the defined convolutional block
+    - First Block
+        - 3 channels; 8 kernel filters 
+    - Second Block
+        - 8 channels; 16 kernel filters
+- Flatten feature maps (1024 features per image)
+- Apply Neural Network
+  - 50% dropout
+  - Linear Model
+  - Rectified Linear Unit
+- Output layer: 10 logits (one per class)
+  
+
+
+
+### Code
+
+```{python}
+class CNN(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv = nn.Sequential(
+            ConvBlock(3, 8),   # (N, 3, 32, 32) -> (N, 8, 16, 16)
+            ConvBlock(8, 16),  # -> (N, 16, 8, 8)
+        )
+        self.output = nn.Sequential(
+            nn.Dropout(p=0.5),
+            nn.Linear(16 * 8 * 8, 16),
+            nn.ReLU(),
+            nn.Linear(16, 10),  # raw class scores (logits)
+        )
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = torch.flatten(x, start_dim=1)  # preserve batch dimension
+        return self.output(x)
+
+model = CNN().to(device)
+print(model)
+```
+
+:::
+
+## Configure Model Training
+
+::: panel-tabset
+
+### Overview
+
+- Use `nn.CrossEntropyLoss` with raw logits and class IDs 0–9.
+- Use RMSprop with learning rate 0.001, matching the R example.
+- Track average training loss and classification accuracy.
+- Train for 10 passes through the training data.
+- `loss.backward()` computes gradients; `optimizer.step()` updates weights.
+
+Do not apply softmax before `CrossEntropyLoss`.
+
+### Code
+
+```{python}
+criterion = nn.CrossEntropyLoss()  # logits + integer class IDs
+optimizer = torch.optim.RMSprop(model.parameters(), lr=0.001)
+```
+
+### While Training
+
+- This may take +10 minutes
+- Discuss with your table the convolutional block
+    - Comment the code.
+:::
+
+## Train the Model
+
+```{python}
+epochs = 10
+history = {'epoch': [], 'train_loss': [], 'train_accuracy': []}
+for epoch in range(1, epochs + 1):
+    model.train()  # enable dropout
+    loss_sum, correct, total = 0.0, 0, 0
+    for images, labels in train_dl:
+        images, labels = images.to(device), labels.to(device)
+        optimizer.zero_grad()
+        testing = model(images)
+        test = criterion(testing, labels)
+        test.backward()
+        optimizer.step()
+
+        n = labels.size(0)
+        loss_sum += test.item() * n  # weight the final smaller batch
+        correct += (testing.argmax(dim=1) == labels).sum().item()
+        total += n
+    history['epoch'].append(epoch)
+    history['train_loss'].append(loss_sum / total)
+    history['train_accuracy'].append(correct / total)
+    print(f"Epoch {epoch:02d}: loss={loss_sum / total:.4f}, "
+          f"accuracy={correct / total:.3f}")
+```
+
+::: notes
+Each batch performs a forward pass, loss calculation, backward pass, and optimizer
+update. Training accuracy is measured batch by batch with dropout enabled and
+changing weights. Evaluate the final fitted model separately below.
+:::
+
+## Plot Loss and Accuracy
+
+```{python}
+fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+axes[0].plot(history['epoch'], history['train_loss'], marker='o')
+axes[0].set(xlabel='Epoch', ylabel='Cross-entropy', title='Training loss')
+axes[1].plot(history['epoch'], history['train_accuracy'], marker='o')
+axes[1].set(xlabel='Epoch', ylabel='Accuracy', title='Training accuracy', ylim=(0, 1))
+for ax in axes:
+    ax.grid(alpha=0.3)
+plt.tight_layout()
+plt.show()
+```
+
+## Evaluate on the Test Set
+
+Use the held-out test data after training. Use a separate validation split if tuning hyperparameters.
+
+```{python}
+model.eval()  # disable dropout; does not itself disable gradients
+test_loss_sum, test_correct, test_total = 0.0, 0, 0
+with torch.inference_mode():
+    for images, labels in test_dl:
+        images, labels = images.to(device), labels.to(device)
+        logits = model(images)
+        loss = criterion(logits, labels)
+        n = labels.size(0)
+        test_loss_sum += loss.item() * n
+        test_correct += (logits.argmax(dim=1) == labels).sum().item()
+        test_total += n
+print(f'Test loss: {test_loss_sum / test_total:.4f}')
+print(f'Test accuracy: {test_correct / test_total:.3f}')
+```
+
+## Predict Image Classes
+
+Apply softmax when probabilities are needed for reporting.
+
+```{python}
+model.eval()
+images, labels = next(iter(test_dl))
+with torch.inference_mode():
+    probabilities = model(images.to(device)).softmax(dim=1).cpu()
+predicted = probabilities.argmax(dim=1)
+fig, axes = plt.subplots(2, 4, figsize=(12, 6))
+for i, ax in enumerate(axes.flat):
+    ax.imshow(display_image(images[i]))
+    ax.set_title(f'True: {classes[labels[i].item()]}\n'
+                 f'Pred: {classes[predicted[i].item()]}')
+    ax.axis('off')
+plt.tight_layout()
+plt.show()
+```
+
+
+## PyTorch References
+
+- [Training a classifier with CIFAR-10](https://docs.pytorch.org/tutorials/beginner/blitz/cifar10_tutorial.html)
+- [CrossEntropyLoss](https://docs.pytorch.org/docs/stable/generated/torch.nn.CrossEntropyLoss.html)
+- [RMSprop](https://docs.pytorch.org/docs/stable/generated/torch.optim.RMSprop.html)
+
+::: notes
+The two convolutional blocks, 16-unit hidden layer, 50% dropout, RMSprop learning
+rate, and 10 training epochs preserve the original example. Python uses
+zero-based indexing: flatten from dimension 1 to retain the batch dimension.
+The transform consistently normalizes images to [-1, 1], as in the Python
+setup in the source. Display code reverses this transform.
+:::
